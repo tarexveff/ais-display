@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AIS Display</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      background: #f7f8fa;
+      color: #1f2328;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #header {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      height: 48px;
+      background: #1f2328;
+      color: #fff;
+    }
+    #header h1 { font-size: 16px; font-weight: 600; }
+    #status-wrap { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #adb5bd; }
+    #status-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: #dc2626;
+      transition: background 0.3s ease;
+    }
+    #status-dot.connected { background: #16a34a; }
+
+    #map { flex: 0 0 60vh; width: 100%; }
+
+    #table-panel { flex: 1 1 0; overflow-y: auto; border-top: 1px solid #e5e7eb; background: #fff; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    thead { position: sticky; top: 0; z-index: 1; background: #1f2328; color: #fff; }
+    thead th { padding: 8px 12px; text-align: left; font-weight: 600; white-space: nowrap; }
+    tbody tr:nth-child(even) { background: #f7f8fa; }
+    tbody tr:hover { background: #e8f0fb; }
+    tbody td { padding: 7px 12px; border-bottom: 1px solid #e5e7eb; white-space: nowrap; }
+    .no-data { padding: 16px 12px; color: #57606a; font-style: italic; }
+
+    .vessel-popup table { font-size: 12px; min-width: 180px; }
+    .vessel-popup td:first-child { color: #57606a; padding-right: 8px; white-space: nowrap; }
+    .vessel-popup td:last-child { font-weight: 600; }
+  </style>
+</head>
+<body>
+
+<div id="header">
+  <h1>AIS Display</h1>
+  <div id="status-wrap">
+    <div id="status-dot"></div>
+    <span id="status-label">Disconnected</span>
+  </div>
+</div>
+
+<div id="map"></div>
+
+<div id="table-panel">
+  <table id="vessel-table">
+    <thead>
+      <tr>
+        <th>MMSI</th><th>Ship Name</th><th>Lat</th><th>Lon</th>
+        <th>Speed (kn)</th><th>Course (°)</th><th>Status</th>
+      </tr>
+    </thead>
+    <tbody id="vessel-tbody">
+      <tr><td colspan="7" class="no-data">Waiting for AIS data…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+'use strict';
+
+// ── Map ──────────────────────────────────────────────────────────────────────
+const map = L.map('map').setView([38.49, -8.89], 11);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+}).addTo(map);
+
+const MARKER_OPTS = { radius: 6, color: '#1e60b0', weight: 1.5, fillColor: '#3b82d4', fillOpacity: 0.9 };
+const TRACK_OPTS  = { color: '#f97316', weight: 2, opacity: 0.75 };
+
+const markers = new Map();
+const tracks  = new Map();
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function fmt(val, dp) {
+  if (val === null || val === undefined) return '—';
+  const n = Number(val);
+  return isFinite(n) ? n.toFixed(dp) : '—';
+}
+function fmtStr(val) {
+  if (val === null || val === undefined) return '—';
+  const s = String(val).trim();
+  return s.length ? s : '—';
+}
+function popupHtml(mmsi, v) {
+  const rows = [
+    ['Ship Name', fmtStr(v.ship_name)],
+    ['MMSI',      mmsi],
+    ['Speed',     fmt(v.speed, 1) + ' kn'],
+    ['Course',    fmt(v.course, 1) + '°'],
+    ['Status',    fmtStr(v.status)],
+    ['Ship Type', fmtStr(v.ship_type)],
+  ];
+  return '<div class="vessel-popup"><table>' +
+    rows.map(([l, v]) => `<tr><td>${l}</td><td>${v}</td></tr>`).join('') +
+    '</table></div>';
+}
+
+// ── Map update ────────────────────────────────────────────────────────────────
+function upsertMarker(mmsi, v) {
+  const lat = Number(v.lat), lon = Number(v.lon);
+  if (!isFinite(lat) || !isFinite(lon) || (lat === 0 && lon === 0)) return;
+  const latlng = [lat, lon];
+  const content = popupHtml(mmsi, v);
+  if (markers.has(mmsi)) {
+    markers.get(mmsi).setLatLng(latlng).setPopupContent(content);
+  } else {
+    markers.set(mmsi, L.circleMarker(latlng, MARKER_OPTS).bindPopup(content).addTo(map));
+  }
+}
+
+function upsertTrack(mmsi, latlngs) {
+  if (!Array.isArray(latlngs) || latlngs.length < 2) {
+    if (tracks.has(mmsi)) { tracks.get(mmsi).remove(); tracks.delete(mmsi); }
+    return;
+  }
+  if (tracks.has(mmsi)) {
+    tracks.get(mmsi).setLatLngs(latlngs);
+  } else {
+    tracks.set(mmsi, L.polyline(latlngs, TRACK_OPTS).addTo(map));
+  }
+}
+
+// ── Table ─────────────────────────────────────────────────────────────────────
+function rebuildTable(vessels) {
+  const tbody = document.getElementById('vessel-tbody');
+  const keys = Object.keys(vessels).sort();
+  if (!keys.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="no-data">Waiting for AIS data…</td></tr>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const mmsi of keys) {
+    const v = vessels[mmsi];
+    const tr = document.createElement('tr');
+    [mmsi, fmtStr(v.ship_name), fmt(v.lat,5), fmt(v.lon,5),
+     fmt(v.speed,1), fmt(v.course,1), fmtStr(v.status)].forEach(text => {
+      const td = document.createElement('td');
+      td.textContent = text;
+      tr.appendChild(td);
+    });
+    frag.appendChild(tr);
+  }
+  tbody.innerHTML = '';
+  tbody.appendChild(frag);
+}
+
+// ── Status indicator ──────────────────────────────────────────────────────────
+function setConnected(on) {
+  document.getElementById('status-dot').classList.toggle('connected', on);
+  document.getElementById('status-label').textContent = on ? 'Connected' : 'Disconnected';
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function startWs() {
+  const url = 'ws://' + location.host + '/ws';
+  console.log('[AIS] connecting to', url);
+  const sock = new WebSocket(url);
+
+  sock.onopen = function() {
+    console.log('[AIS] connected');
+    setConnected(true);
+  };
+
+  sock.onmessage = function(event) {
+    let data;
+    try { data = JSON.parse(event.data); } catch(e) { return; }
+
+    const vessels   = data.vessels || {};
+    const trackData = data.tracks  || {};
+
+    // Upsert markers and tracks
+    for (const [mmsi, v] of Object.entries(vessels)) {
+      upsertMarker(mmsi, v);
+      upsertTrack(mmsi, trackData[mmsi] || []);
+    }
+    // Remove stale vessels
+    for (const mmsi of markers.keys()) {
+      if (!(mmsi in vessels)) { markers.get(mmsi).remove(); markers.delete(mmsi); }
+    }
+    for (const mmsi of tracks.keys()) {
+      if (!(mmsi in vessels)) { tracks.get(mmsi).remove(); tracks.delete(mmsi); }
+    }
+
+    rebuildTable(vessels);
+  };
+
+  sock.onclose = function(e) {
+    console.log('[AIS] closed, code=' + e.code + ' — reconnecting in 3s');
+    setConnected(false);
+    setTimeout(startWs, 3000);
+  };
+
+  sock.onerror = function(e) {
+    console.error('[AIS] error', e);
+    // onclose fires immediately after onerror; reconnect is handled there
+  };
+}
+
+// Defer until DOM and Leaflet are fully ready
+window.addEventListener('load', startWs);
+</script>
+</body>
+</html>
