@@ -50,12 +50,20 @@ TARGETS: list[tuple[str, int]] = parse_targets(_raw_env)
 _sock: socket.socket | None = None
 if TARGETS:
     _sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    logger.debug("forwarder: forwarding NMEA sentences to %d target(s): %s", len(TARGETS), TARGETS)
+    logger.info("forwarder: NMEA forwarding enabled — %d target(s): %s", len(TARGETS), TARGETS)
+else:
+    logger.info(
+        "forwarder: FORWARD_TARGETS=%r — no targets configured, forwarding disabled",
+        _raw_env,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+_forward_count: int = 0  # used to log a one-time confirmation on first forward
+
 
 async def forward(sentence: str) -> None:
     """Send *sentence* as a UDP datagram to every configured target.
@@ -64,8 +72,13 @@ async def forward(sentence: str) -> None:
     targets are logged at WARNING level and never propagate — the forwarder is
     strictly fire-and-forget.
     """
+    global _forward_count
     if not TARGETS:
         return
+
+    if _forward_count == 0:
+        logger.info("forwarder: first NMEA sentence forwarded — forwarding is working")
+    _forward_count += 1
 
     # Ensure standard NMEA line termination.
     if not sentence.endswith("\r\n"):
