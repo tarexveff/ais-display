@@ -2,7 +2,7 @@
 
 Containerized AIS receiver and live map viewer for RHEL. Receives AIS radio
 signals via an RTL-SDR USB dongle, decodes NMEA sentences in real time, and
-serves a web UI with a live vessel map and data table. ytfythgjgj
+serves a web UI with a live vessel map and data table
 
 ---
 
